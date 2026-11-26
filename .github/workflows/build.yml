@@ -16,16 +16,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Si subiste el zip al repo, lo descomprime. Si subiste el proyecto suelto, lo usa tal cual.
+      # Busca el proyecto en el repo; si no esta suelto, descomprime cualquier zip que encuentre.
       - name: Preparar proyecto
         run: |
-          if [ -f emil-ragdoll-1_0.zip ]; then
-            unzip -q emil-ragdoll-1_0.zip -d src
-            P=$(find src -maxdepth 2 -name CMakeLists.txt -printf '%h\n' | head -1)
-          else
-            P=.
+          set -eu
+          find_proj() {
+            f=$(find "$1" -name 'mujoco-3.17.0-emil-static.patch' -path '*third_party*' | head -1)
+            [ -n "$f" ] && dirname "$(dirname "$f")"
+          }
+          P=$(find_proj . || true)
+          if [ -z "$P" ]; then
+            Z=$(find . -iname '*.zip' -not -path './.git/*' | head -1)
+            if [ -z "$Z" ]; then
+              echo "ERROR: no encontre el proyecto ni ningun zip. Archivos del repositorio:"
+              ls -R . | grep -v '^./.git' | head -60
+              exit 1
+            fi
+            echo "Descomprimiendo $Z"
+            unzip -q "$Z" -d src
+            P=$(find_proj src || true)
+            if [ -z "$P" ]; then
+              echo "ERROR: el zip no contiene third_party/mujoco-3.17.0-emil-static.patch. Contenido:"
+              ls -R src | head -60
+              exit 1
+            fi
           fi
           echo "PROJ=$(realpath "$P")" >> "$GITHUB_ENV"
+          echo "Proyecto en: $P"
           ls "$P"
 
       - uses: actions/setup-java@v4
