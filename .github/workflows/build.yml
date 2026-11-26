@@ -50,16 +50,18 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: nttld/setup-ndk@v1
-        id: ndk
-        with:
-          ndk-version: r27c
-          add-to-path: false
-
-      - name: Variables del NDK y herramientas
+      - name: Android SDK y NDK 28.1
         run: |
-          echo "ANDROID_NDK=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          set -eu
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          set +e
+          yes | "$SDKM" --licenses > /dev/null
+          set -e
+          "$SDKM" "platform-tools" "build-tools;35.0.1" "platforms;android-35" "cmdline-tools;latest" "ndk;28.1.13356709" > /dev/null
+          NDK="$ANDROID_HOME/ndk/28.1.13356709"
+          test -d "$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "ANDROID_NDK=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
           sudo apt-get update -qq
           sudo apt-get install -y -qq ninja-build patch scons
 
@@ -95,8 +97,17 @@ jobs:
           set -eu
           if [ ! -f "$EMIL_DEPS/godot-cpp/bin/libgodot-cpp.android.template_debug.arm64.a" ]; then
             rm -rf "$EMIL_DEPS/godot-cpp"
-            git clone --depth 1 --branch 10.0.0 https://github.com/godotengine/godot-cpp "$EMIL_DEPS/godot-cpp" \
-              || { echo "AVISO: no existe el tag 10.0.0, uso master"; git clone --depth 1 https://github.com/godotengine/godot-cpp "$EMIL_DEPS/godot-cpp"; }
+            TAGS=$(git ls-remote --tags --refs https://github.com/godotengine/godot-cpp | sed 's|.*refs/tags/||' | grep -E '^10\.' || true)
+            echo "Tags 10.x encontrados: $TAGS"
+            TAG=$(echo "$TAGS" | grep -v -- '-' | sort -V | tail -1 || true)
+            [ -n "$TAG" ] || TAG=$(echo "$TAGS" | sort -V | tail -1 || true)
+            if [ -n "$TAG" ]; then
+              echo "Usando godot-cpp $TAG"
+              git clone --depth 1 --branch "$TAG" https://github.com/godotengine/godot-cpp "$EMIL_DEPS/godot-cpp"
+            else
+              echo "AVISO: sin tag 10.x, uso master"
+              git clone --depth 1 https://github.com/godotengine/godot-cpp "$EMIL_DEPS/godot-cpp"
+            fi
             cd "$EMIL_DEPS/godot-cpp"
             scons platform=android arch=arm64 target=template_debug -j"$(nproc)"
           fi
@@ -119,14 +130,9 @@ jobs:
           name: emil-proyecto-con-libreria
           path: ${{ env.PROJ }}/editor
 
-      - name: Instalar Android SDK y Godot
+      - name: Instalar Godot y firma debug
         run: |
           set -eu
-          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          set +e
-          yes | "$SDKM" --licenses > /dev/null
-          set -e
-          "$SDKM" "platform-tools" "build-tools;35.0.1" "platforms;android-35" "cmdline-tools;latest" > /dev/null
           cd "$RUNNER_TEMP"
           BASE="https://github.com/godotengine/godot-builds/releases/download/$GODOT_VER-stable"
           curl -fsSL --retry 3 -o godot.zip "$BASE/Godot_v$GODOT_VER-stable_linux.x86_64.zip"
@@ -157,7 +163,8 @@ jobs:
         env:
           GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ runner.temp }}/debug.keystore
           GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
-          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+          GODOT_ANDROID_KEYS
+        TORE_DEBUG_PASSWORD: android
         run: |
           set -eu
           cd "$PROJ"
