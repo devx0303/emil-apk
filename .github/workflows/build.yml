@@ -109,7 +109,7 @@ jobs:
               git clone --depth 1 https://github.com/godotengine/godot-cpp "$EMIL_DEPS/godot-cpp"
             fi
             cd "$EMIL_DEPS/godot-cpp"
-            scons platform=android arch=arm64 target=template_debug -j"$(nproc)"
+            scons platform=android arch=arm64 target=template_debug api_version=4.7 -j"$(nproc)"
           fi
           ls -la "$EMIL_DEPS/godot-cpp/bin"
 
