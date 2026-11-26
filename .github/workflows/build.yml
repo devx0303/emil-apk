@@ -1,0 +1,159 @@
+name: Build EMIL APK
+
+# Se ejecuta solo cuando haces push, o a mano desde Actions > Build EMIL APK > Run workflow.
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      EMIL_DEPS: ${{ github.workspace }}/deps
+      MJ_VER: "3.17.0"
+      GODOT_VER: "4.7.2"
+    steps:
+      - uses: actions/checkout@v4
+
+      # Si subiste el zip al repo, lo descomprime. Si subiste el proyecto suelto, lo usa tal cual.
+      - name: Preparar proyecto
+        run: |
+          if [ -f emil-ragdoll-1_0.zip ]; then
+            unzip -q emil-ragdoll-1_0.zip -d src
+            P=$(find src -maxdepth 2 -name CMakeLists.txt -printf '%h\n' | head -1)
+          else
+            P=.
+          fi
+          echo "PROJ=$(realpath "$P")" >> "$GITHUB_ENV"
+          ls "$P"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      - name: Variables del NDK y herramientas
+        run: |
+          echo "ANDROID_NDK=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build patch scons
+
+      - name: Cache de dependencias
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: deps-${{ runner.os }}-mj${{ env.MJ_VER }}-${{ hashFiles('.github/workflows/build.yml') }}
+
+      - name: MuJoCo para Android arm64
+        run: |
+          set -eu
+          S="$EMIL_DEPS/mujoco-$MJ_VER"
+          B="$S/build-android"
+          if [ ! -f "$B/lib/libmujoco.a" ]; then
+            mkdir -p "$EMIL_DEPS"
+            cd "$EMIL_DEPS"
+            curl -fsSL --retry 3 -o mj.tgz "https://github.com/google-deepmind/mujoco/archive/refs/tags/$MJ_VER.tar.gz"
+            tar xzf mj.tgz
+            (cd "mujoco-$MJ_VER" && patch -p1 -s < "$PROJ/third_party/mujoco-$MJ_VER-emil-static.patch")
+            cmake -S "$S" -B "$B" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE="$PROJ/tools/android-arm64.cmake" \
+              -DLIBM_LIBRARY="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/28/libm.so" \
+              -DMUJOCO_BUILD_EXAMPLES=OFF -DMUJOCO_BUILD_SIMULATE=OFF -DMUJOCO_BUILD_TESTS=OFF \
+              -DMUJOCO_TEST_PYTHON_UTIL=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+              -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF
+            cmake --build "$B" --target mujoco tinyxml2 qhullstatic_r ccd tinyobjloader miniz render_noop
+          fi
+          ls -la "$B/lib"
+
+      - name: godot-cpp 10.0.0 para Android arm64
+        run: |
+          set -eu
+          if [ ! -f "$EMIL_DEPS/godot-cpp/bin/libgodot-cpp.android.template_debug.arm64.a" ]; then
+            rm -rf "$EMIL_DEPS/godot-cpp"
+            git clone --depth 1 --branch 10.0.0 https://github.com/godotengine/godot-cpp "$EMIL_DEPS/godot-cpp" \
+              || { echo "AVISO: no existe el tag 10.0.0, uso master"; git clone --depth 1 https://github.com/godotengine/godot-cpp "$EMIL_DEPS/godot-cpp"; }
+            cd "$EMIL_DEPS/godot-cpp"
+            scons platform=android arch=arm64 target=template_debug -j"$(nproc)"
+          fi
+          ls -la "$EMIL_DEPS/godot-cpp/bin"
+
+      - name: Compilar la extension EMIL (libemil.android.arm64.so)
+        run: |
+          set -eu
+          cd "$PROJ"
+          cmake -S . -B build-godot-android -G Ninja -DEMIL_GODOT=ON -DEMIL_DEPS="$EMIL_DEPS" \
+            -DCMAKE_TOOLCHAIN_FILE="$PROJ/tools/android-arm64.cmake" \
+            -DMUJOCO_LIBDIR="$EMIL_DEPS/mujoco-$MJ_VER/build-android/lib"
+          cmake --build build-godot-android --target emil_godot
+          ls -la editor/bin
+
+      # Se sube ya aqui, por si el paso del APK falla: tienes el proyecto listo con la libreria.
+      - name: Subir proyecto con libreria
+        uses: actions/upload-artifact@v4
+        with:
+          name: emil-proyecto-con-libreria
+          path: ${{ env.PROJ }}/editor
+
+      - name: Instalar Android SDK y Godot
+        run: |
+          set -eu
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          set +e
+          yes | "$SDKM" --licenses > /dev/null
+          set -e
+          "$SDKM" "platform-tools" "build-tools;35.0.1" "platforms;android-35" "cmdline-tools;latest" > /dev/null
+          cd "$RUNNER_TEMP"
+          BASE="https://github.com/godotengine/godot-builds/releases/download/$GODOT_VER-stable"
+          curl -fsSL --retry 3 -o godot.zip "$BASE/Godot_v$GODOT_VER-stable_linux.x86_64.zip"
+          curl -fsSL --retry 3 -o tpl.tpz "$BASE/Godot_v$GODOT_VER-stable_export_templates.tpz"
+          unzip -q godot.zip
+          chmod +x "Godot_v$GODOT_VER-stable_linux.x86_64"
+          unzip -q tpl.tpz
+          T="$HOME/.local/share/godot/export_templates/$GODOT_VER.stable"
+          mkdir -p "$T"
+          mv templates/* "$T/"
+          echo "GODOT=$RUNNER_TEMP/Godot_v$GODOT_VER-stable_linux.x86_64" >> "$GITHUB_ENV"
+          echo "TPL=$T/android_debug.apk" >> "$GITHUB_ENV"
+          keytool -genkeypair -keystore "$RUNNER_TEMP/debug.keystore" -storepass android -alias androiddebugkey \
+            -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          mkdir -p "$HOME/.config/godot"
+          cat > "$HOME/.config/godot/editor_settings-4.7.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          export/android/debug_keystore = "$RUNNER_TEMP/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
+
+      - name: Exportar APK
+        env:
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ runner.temp }}/debug.keystore
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
+          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+        run: |
+          set -eu
+          cd "$PROJ"
+          mkdir -p build-apk editor/params
+          python3 -I tools/patch_minsdk.py "$TPL" build-apk/android_debug_min28.apk 28
+          "$GODOT" --headless --path editor --import || true
+          sed -i "s|^custom_template/debug=.*|custom_template/debug=\"$PWD/build-apk/android_debug_min28.apk\"|" editor/export_presets.cfg
+          "$GODOT" --headless --path editor --export-debug "Android" ../build-apk/emil_editor.apk
+          ls -la build-apk
+          test -f build-apk/emil_editor.apk
+
+      - name: Subir APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: emil-apk
+          path: ${{ env.PROJ }}/build-apk/emil_editor.apk
